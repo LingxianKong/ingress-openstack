@@ -646,7 +646,15 @@ func (os *OpenStack) EnsurePolicyRules(deleted bool, policyName, lbID, listenerI
 		if !ruleExists(existingRules, "HOST_NAME", host) {
 			log.WithFields(log.Fields{"type": l7policies.TypeHostName, "host": host, "policyName": policyName}).Info("creating policy rule")
 
-			// TODO create rule
+			// Create HOST_NAME type rule
+			_, err = l7policies.CreateRule(os.octavia, policy.ID, l7policies.CreateRuleOpts{
+				RuleType:    l7policies.TypeHostName,
+				CompareType: l7policies.CompareTypeEqual,
+				Value:       host,
+			}).Extract()
+			if err != nil {
+				return fmt.Errorf("error creating l7 rule: %v", err)
+			}
 		} else {
 			existingRules = popRule(existingRules, "HOST_NAME", host)
 		}
@@ -663,7 +671,15 @@ func (os *OpenStack) EnsurePolicyRules(deleted bool, policyName, lbID, listenerI
 		if !ruleExists(existingRules, "PATH", path) {
 			log.WithFields(log.Fields{"type": l7policies.TypePath, "path": path, "policyName": policyName}).Info("creating policy rule")
 
-			// TODO create rule
+			// Create PATH type rule
+			_, err = l7policies.CreateRule(os.octavia, policy.ID, l7policies.CreateRuleOpts{
+				RuleType:    l7policies.TypePath,
+				CompareType: l7policies.CompareTypeStartWith,
+				Value:       path,
+			}).Extract()
+			if err != nil {
+				return fmt.Errorf("error creating l7 rule: %v", err)
+			}
 		} else {
 			existingRules = popRule(existingRules, "PATH", path)
 		}
