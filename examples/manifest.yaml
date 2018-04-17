@@ -1,0 +1,40 @@
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    scheduler.alpha.kubernetes.io/critical-pod: ""
+  labels:
+    component: openstack-ingress-controller
+    tier: control-plane
+  name: openstack-ingress-controller
+  namespace: kube-system
+spec:
+  containers:
+    - name: openstack-ingress-controller
+      image: lingxiankong/openstack-ingress-controller:0.0.1
+      imagePullPolicy: Always
+      args:
+        - /bin/ingress-openstack
+        - --config=/etc/kubernetes/ingress-openstack.yaml
+      volumeMounts:
+      - mountPath: /etc/kubernetes/ingress-openstack.yaml
+        name: ingressconfig
+        readOnly: true
+      - mountPath: /etc/kubernetes/ingress-openstack.conf
+        name: kubeconfig
+        readOnly: true
+      resources:
+        requests:
+          cpu: 200m
+  hostNetwork: true
+  volumes:
+  - hostPath:
+      path: /etc/kubernetes/ingress-openstack.yaml
+      type: FileOrCreate
+    name: ingressconfig
+  - hostPath:
+      path: /etc/kubernetes/ingress-openstack.conf
+      type: FileOrCreate
+    name: kubeconfig
+status: {}

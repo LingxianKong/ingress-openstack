@@ -18,6 +18,7 @@ package controller
 
 import (
 	"fmt"
+	"reflect"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -205,6 +206,9 @@ func NewController(conf config.Config) *Controller {
 				// Two different versions of the same Ingress will always have different RVs.
 				return
 			}
+			if reflect.DeepEqual(newIng.Spec, oldIng.Spec) {
+				return
+			}
 			controller.enqueueIng(new)
 		},
 		DeleteFunc: controller.enqueueIng,
@@ -355,9 +359,8 @@ func (c *Controller) ensureIngress(ing *ext_v1beta1.Ingress) error {
 		return err
 	}
 
-	// add default pool for the listener
+	// Add default pool for the listener if 'backend' is defined
 	defaultPoolName := listenerName + "-pool"
-
 	if ing.Spec.Backend != nil {
 		serviceName := fmt.Sprintf("%s/%s", ing.ObjectMeta.Namespace, ing.Spec.Backend.ServiceName)
 		nodePort, err := c.getServiceNodePort(serviceName, ing.Spec.Backend.ServicePort.IntValue())
@@ -375,20 +378,26 @@ func (c *Controller) ensureIngress(ing *ext_v1beta1.Ingress) error {
 		}
 	}
 
+	// Delete all existing policies
 	existingPolicies, err := c.osClient.GetL7policies(listener.ID)
 	if err != nil {
 		return err
 	}
-	log.WithFields(log.Fields{"existingPolicies": existingPolicies}).Debug("existing policies found")
+	for _, p := range existingPolicies {
+		c.osClient.DeleteL7policy(p.ID, lb.ID)
+	}
 
+	// Delete all existing shared pools
 	existingSharedPools, err := c.osClient.GetSharedPools(lb.ID)
 	if err != nil {
 		return err
 	}
-	log.WithFields(log.Fields{"existingSharedPools": existingSharedPools}).Debug("existing shared pools found")
+	for _, sp := range existingSharedPools {
+		c.osClient.DeletePool(sp.ID, lb.ID)
+	}
 
 	// Add l7 load balancing rules. Each host and path combination is mapped to a l7 policy in octavia,
-	// which contains two rules(with type 'HOST_NAME' and 'PATH' repectively)
+	// which contains two rules(with type 'HOST_NAME' and 'PATH' respectively)
 	for _, rule := range ing.Spec.Rules {
 		host := rule.Host
 
@@ -401,10 +410,6 @@ func (c *Controller) ensureIngress(ing *ext_v1beta1.Ingress) error {
 				return err
 			}
 
-			if poolExists(existingSharedPools, poolName) {
-				existingSharedPools = popPool(existingSharedPools, poolName)
-			}
-
 			poolID, err := c.osClient.EnsurePoolMembers(false, poolName, lb.ID, "", &nodePort, nodeObjs)
 			if err != nil {
 				return err
@@ -412,27 +417,9 @@ func (c *Controller) ensureIngress(ing *ext_v1beta1.Ingress) error {
 
 			// make the policy name unique
 			policyName := hash(fmt.Sprintf("%s+%s", host, path.Path))
-			if policyExists(existingPolicies, policyName, *poolID) {
-				existingPolicies = popPolicy(existingPolicies, policyName)
-			}
-
 			if err = c.osClient.EnsurePolicyRules(false, policyName, lb.ID, listener.ID, *poolID, host, path.Path); err != nil {
 				return err
 			}
-		}
-	}
-
-	// Delete obsolete policies
-	for _, p := range existingPolicies {
-		if err = c.osClient.EnsurePolicyRules(true, p.Name, lb.ID, listener.ID, p.RedirectPoolID, "", ""); err != nil {
-			return err
-		}
-	}
-
-	// Delete obsolete shared pools
-	for _, p := range existingSharedPools {
-		if _, err := c.osClient.EnsurePoolMembers(true, p.Name, lb.ID, listener.ID, nil, nil); err != nil {
-			return err
 		}
 	}
 

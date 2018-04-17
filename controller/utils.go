@@ -20,8 +20,6 @@ import (
 	"crypto/sha256"
 	"fmt"
 
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/l7policies"
-	"github.com/gophercloud/gophercloud/openstack/loadbalancer/v2/pools"
 	apiv1 "k8s.io/api/core/v1"
 	ext_v1beta1 "k8s.io/api/extensions/v1beta1"
 )
@@ -33,44 +31,6 @@ func hash(data string) string {
 func getResourceName(ing *ext_v1beta1.Ingress, suffix string) string {
 	name := fmt.Sprintf("k8s-%s-%s-%s", ing.ObjectMeta.Namespace, ing.ObjectMeta.Name, suffix)
 	return name
-}
-
-func policyExists(policies []l7policies.L7Policy, policyName string, poolID string) bool {
-	for _, p := range policies {
-		if p.Name == policyName && p.RedirectPoolID == poolID {
-			return true
-		}
-	}
-	return false
-}
-
-func popPolicy(policies []l7policies.L7Policy, policyName string) []l7policies.L7Policy {
-	for i, p := range policies {
-		if p.Name == policyName {
-			policies[i] = policies[len(policies)-1]
-			policies = policies[:len(policies)-1]
-		}
-	}
-	return policies
-}
-
-func poolExists(curPools []pools.Pool, poolName string) bool {
-	for _, p := range curPools {
-		if p.Name == poolName {
-			return true
-		}
-	}
-	return false
-}
-
-func popPool(curPools []pools.Pool, poolName string) []pools.Pool {
-	for i, p := range curPools {
-		if p.Name == poolName {
-			curPools[i] = curPools[len(curPools)-1]
-			curPools = curPools[:len(curPools)-1]
-		}
-	}
-	return curPools
 }
 
 func loadBalancerStatusDeepCopy(lb *apiv1.LoadBalancerStatus) *apiv1.LoadBalancerStatus {
