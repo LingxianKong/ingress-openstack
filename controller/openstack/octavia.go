@@ -31,6 +31,8 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
+type empty struct{}
+
 const (
 	loadbalancerActiveInitDealy = 5 * time.Second
 	loadbalancerActiveFactor    = 1
@@ -192,9 +194,9 @@ func (os *OpenStack) getPoolByName(name string, lbID string) (*pools.Pool, error
 	return &listenerPools[0], nil
 }
 
-// GetSharedPools retrives all shared pools belong to the loadbalancer.
-func (os *OpenStack) GetSharedPools(lbID string) ([]pools.Pool, error) {
-	var sharedPools []pools.Pool
+// GetPools retrives the pools belong to the loadbalancer.
+func (os *OpenStack) GetPools(lbID string, shared bool) ([]pools.Pool, error) {
+	var lbPools []pools.Pool
 
 	opts := pools.ListOpts{
 		LoadbalancerID: lbID,
@@ -205,10 +207,10 @@ func (os *OpenStack) GetSharedPools(lbID string) ([]pools.Pool, error) {
 			return false, err
 		}
 		for _, p := range v {
-			// Make sure we only get pools with empty listeners list.
-			if len(p.Listeners) == 0 {
-				sharedPools = append(sharedPools, p)
+			if shared && len(p.Listeners) != 0 {
+				continue
 			}
+			lbPools = append(lbPools, p)
 		}
 
 		return true, nil
@@ -217,7 +219,27 @@ func (os *OpenStack) GetSharedPools(lbID string) ([]pools.Pool, error) {
 		return nil, err
 	}
 
-	return sharedPools, nil
+	return lbPools, nil
+}
+
+// GetMembers retrieve all the members of the specified pool
+func (os *OpenStack) GetMembers(poolID string) ([]pools.Member, error) {
+	var members []pools.Member
+
+	opts := pools.ListMembersOpts{}
+	err := pools.ListMembers(os.octavia, poolID, opts).EachPage(func(page pagination.Page) (bool, error) {
+		v, err := pools.ExtractMembers(page)
+		if err != nil {
+			return false, err
+		}
+		members = append(members, v...)
+		return true, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return members, nil
 }
 
 // DeletePool deletes a pool
@@ -561,6 +583,92 @@ func (os *OpenStack) EnsurePolicyRules(deleted bool, policyName, lbID, listenerI
 		}
 
 		log.WithFields(log.Fields{"type": l7policies.TypePath, "path": path, "policyName": policyName}).Info("policy rule created")
+	}
+
+	return nil
+}
+
+// UpdateLoadbalancerMembers update members for all the pools in the specified loadbalancer.
+func (os *OpenStack) UpdateLoadbalancerMembers(lbID string, nodes []*apiv1.Node) error {
+	lbPools, err := os.GetPools(lbID, false)
+	if err != nil {
+		return err
+	}
+
+	addrs := map[string]empty{}
+	for _, node := range nodes {
+		addr, err := getNodeAddressForLB(node)
+		if err != nil {
+			log.WithFields(log.Fields{"name": node.ObjectMeta.Name}).Warningf("Failed to get node address: %v", err)
+			continue
+		}
+		addrs[addr] = empty{}
+	}
+
+	for _, pool := range lbPools {
+		log.WithFields(log.Fields{"poolID": pool.ID}).Info("Starting to update pool members")
+
+		members, err := os.GetMembers(pool.ID)
+		if err != nil {
+			log.WithFields(log.Fields{"poolID": pool.ID}).Errorf("Failed to get pool members: %v", err)
+			continue
+		}
+
+		// Members have the same ProtocolPort
+		servicePort := members[0].ProtocolPort
+
+		addrMemberMapping := make(map[string]pools.Member)
+		for _, member := range members {
+			addrMemberMapping[member.Address] = member
+		}
+
+		// Add any new members for this port
+		for addr := range addrs {
+			if _, ok := addrMemberMapping[addr]; ok {
+				continue
+			}
+
+			log.WithFields(log.Fields{"poolID": pool.ID, "memberAddress": addr}).Info("Adding new member to the pool")
+
+			// This is a new node joined to the cluster
+			if _, err = pools.CreateMember(os.octavia, pool.ID, pools.CreateMemberOpts{
+				ProtocolPort: servicePort,
+				Address:      addr,
+			}).Extract(); err != nil {
+				return err
+			}
+
+			log.WithFields(log.Fields{"poolID": pool.ID, "memberAddress": addr}).Info("Finished to add new member to the pool")
+
+			_, err = os.waitLoadbalancerActiveProvisioningStatus(lbID)
+			if err != nil {
+				return fmt.Errorf("error waiting for loadbalancer %s to be active: %v", lbID, err)
+			}
+		}
+
+		// Remove any old members
+		for _, member := range addrMemberMapping {
+			if _, ok := addrs[member.Address]; ok {
+				continue
+			}
+
+			log.WithFields(log.Fields{"poolID": pool.ID, "memberAddress": member.Address}).Info("Deleting old member from the pool")
+
+			err = pools.DeleteMember(os.octavia, pool.ID, member.ID).ExtractErr()
+			if err != nil && !isNotFound(err) {
+				log.WithFields(log.Fields{"poolID": pool.ID, "memberAddress": member.Address}).Error("Failed to delete old member from the pool")
+				return err
+			}
+
+			log.WithFields(log.Fields{"poolID": pool.ID, "memberAddress": member.Address}).Info("Finished to delete old member from the pool")
+
+			_, err = os.waitLoadbalancerActiveProvisioningStatus(lbID)
+			if err != nil {
+				return fmt.Errorf("error waiting for loadbalancer %s to be active: %v", lbID, err)
+			}
+		}
+
+		log.WithFields(log.Fields{"poolID": pool.ID}).Info("Finished to update pool members")
 	}
 
 	return nil

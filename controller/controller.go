@@ -25,6 +25,7 @@ import (
 	apiv1 "k8s.io/api/core/v1"
 	ext_v1beta1 "k8s.io/api/extensions/v1beta1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/informers"
@@ -69,7 +70,7 @@ var (
 // Controller ...
 type Controller struct {
 	stopCh              chan struct{}
-	knownHosts          []*apiv1.Node
+	knownNodes          []*apiv1.Node
 	queue               workqueue.RateLimitingInterface
 	informer            informers.SharedInformerFactory
 	ingressLister       ext_listers.IngressLister
@@ -191,6 +192,7 @@ func NewController(conf config.Config) *Controller {
 		serviceListerSynced: serviceInformer.Informer().HasSynced,
 		nodeLister:          nodeInformer.Lister(),
 		nodeListerSynced:    nodeInformer.Informer().HasSynced,
+		knownNodes:          []*apiv1.Node{},
 		osClient:            osClient,
 		kubeClient:          kubeClient,
 	}
@@ -236,8 +238,15 @@ func (c *Controller) Start() {
 	}
 	log.Info("ingress controller synced and ready")
 
+	newNodes, err := c.nodeLister.ListWithPredicate(getNodeConditionPredicate())
+	if err != nil {
+		log.Errorf("Failed to retrieve current set of nodes from node lister: %v", err)
+		return
+	}
+	c.knownNodes = newNodes
+
 	go wait.Until(c.runWorker, time.Second, c.stopCh)
-	go wait.Until(c.nodeSyncLoop, 100*time.Second, c.stopCh)
+	go wait.Until(c.nodeSyncLoop, 60*time.Second, c.stopCh)
 
 	<-c.stopCh
 }
@@ -256,6 +265,49 @@ func (c *Controller) enqueueIng(obj interface{}) {
 // nodeSyncLoop handles updating the hosts pointed to by all load
 // balancers whenever the set of nodes in the cluster changes.
 func (c *Controller) nodeSyncLoop() {
+	newNodes, err := c.nodeLister.ListWithPredicate(getNodeConditionPredicate())
+	if err != nil {
+		log.Errorf("Failed to retrieve current set of nodes from node lister: %v", err)
+		return
+	}
+	if nodeSlicesEqualForLB(newNodes, c.knownNodes) {
+		return
+	}
+
+	log.Infof("Detected change in list of current cluster nodes. New node set: %v", nodeNames(newNodes))
+
+	ings := new(ext_v1beta1.IngressList)
+	// TODO: only take ingresses without ip address into consideration
+	opts := apimeta_v1.ListOptions{}
+	if ings, err = c.kubeClient.ExtensionsV1beta1().Ingresses("").List(opts); err != nil {
+		log.Errorf("Failed to retrieve current set of ingresses: %v", err)
+		return
+	}
+
+	// Update each ingress
+	for _, ing := range ings.Items {
+		log.WithFields(log.Fields{"ingress": ing.ObjectMeta.Name}).Info("Starting to handle ingress")
+
+		lbName := getResourceName(&ing, "lb")
+		loadbalancer, err := c.osClient.GetLoadbalancerByName(lbName)
+		if err != nil {
+			if err != openstack.ErrNotFound {
+				log.WithFields(log.Fields{"name": lbName}).Errorf("Failed to retrieve loadbalancer from OpenStack: %v", err)
+			}
+
+			// If lb doesn't exist or error occured, continue
+			continue
+		}
+
+		if err = c.osClient.UpdateLoadbalancerMembers(loadbalancer.ID, newNodes); err != nil {
+			log.WithFields(log.Fields{"ingress": ing.ObjectMeta.Name}).Errorf("Failed to handle ingress")
+			continue
+		}
+
+		log.WithFields(log.Fields{"ingress": ing.ObjectMeta.Name}).Info("Finished to handle ingress")
+	}
+
+	c.knownNodes = newNodes
 }
 
 func (c *Controller) runWorker() {
@@ -388,7 +440,7 @@ func (c *Controller) ensureIngress(ing *ext_v1beta1.Ingress) error {
 	}
 
 	// Delete all existing shared pools
-	existingSharedPools, err := c.osClient.GetSharedPools(lb.ID)
+	existingSharedPools, err := c.osClient.GetPools(lb.ID, true)
 	if err != nil {
 		return err
 	}

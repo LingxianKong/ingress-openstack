@@ -19,6 +19,7 @@ package controller
 import (
 	"crypto/sha256"
 	"fmt"
+	"sort"
 
 	apiv1 "k8s.io/api/core/v1"
 	ext_v1beta1 "k8s.io/api/extensions/v1beta1"
@@ -64,6 +65,39 @@ func ingressEqual(lhs, rhs *apiv1.LoadBalancerIngress) bool {
 	}
 	if lhs.Hostname != rhs.Hostname {
 		return false
+	}
+	return true
+}
+
+func nodeNames(nodes []*apiv1.Node) []string {
+	ret := make([]string, len(nodes))
+	for i, node := range nodes {
+		ret[i] = node.Name
+	}
+	return ret
+}
+
+func nodeSlicesEqualForLB(x, y []*apiv1.Node) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	return stringSlicesEqual(nodeNames(x), nodeNames(y))
+}
+
+func stringSlicesEqual(x, y []string) bool {
+	if len(x) != len(y) {
+		return false
+	}
+	if !sort.StringsAreSorted(x) {
+		sort.Strings(x)
+	}
+	if !sort.StringsAreSorted(y) {
+		sort.Strings(y)
+	}
+	for i := range x {
+		if x[i] != y[i] {
+			return false
+		}
 	}
 	return true
 }
